@@ -1,8 +1,8 @@
 import { getToolUiResourceUri, McpUiToolMetaSchema } from "@modelcontextprotocol/ext-apps/app-bridge";
-import type { Tool } from "@modelcontextprotocol/client";
-import { Component, type ErrorInfo, type ReactNode, StrictMode, Suspense, use, useEffect, useMemo, useRef, useState } from "react";
+import type { CallToolResult, Tool } from "@modelcontextprotocol/client";
+import { Component, type ErrorInfo, type ReactNode, StrictMode, Suspense, use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { callTool, connectToServer, hasAppHtml, initializeApp, loadSandboxProxy, log, newAppBridge, type ServerInfo, type ToolCallInfo, type ModelContext, type AppMessage } from "./implementation";
+import { callTool, callViewTool, connectToServer, hasAppHtml, initializeApp, listViewTools, loadSandboxProxy, log, newAppBridge, viewHasTools, type ServerInfo, type ToolCallInfo, type ModelContext, type AppMessage } from "./implementation";
 import { getTheme, toggleTheme, onThemeChange, type Theme } from "./theme";
 import styles from "./index.module.css";
 
@@ -417,6 +417,15 @@ function CollapsiblePanel({ icon, label, content, badge, defaultExpanded = false
 }
 
 
+// Dev-only: expose live bridges for console-driven testing, e.g.
+//   const b = [...__basicHostBridges.values()][0];
+//   await b.callTool({ name: "get-current-view", arguments: {} });
+declare global {
+  interface Window { __basicHostBridges?: Map<number, ReturnType<typeof newAppBridge>> }
+}
+let nextDebugBridgeId = 0;
+
+
 interface AppIFramePanelProps {
   toolCallInfo: Required<ToolCallInfo>;
   isDestroying?: boolean;
@@ -428,6 +437,35 @@ function AppIFramePanel({ toolCallInfo, isDestroying, onTeardownComplete }: AppI
   const [modelContext, setModelContext] = useState<ModelContext | null>(null);
   const [messages, setMessages] = useState<AppMessage[]>([]);
   const [displayMode, setDisplayMode] = useState<"inline" | "fullscreen">("inline");
+  const [bridgeReady, setBridgeReady] = useState(false);
+  // null = view did not declare the `tools` capability (panel hidden)
+  const [viewTools, setViewTools] = useState<Tool[] | null>(null);
+  // Set synchronously on teardown so no view tool calls race `teardownResource`
+  const destroyingRef = useRef(false);
+  const debugBridgeIdRef = useRef<number | null>(null);
+
+  const refreshViewTools = useCallback(async () => {
+    const bridge = appBridgeRef.current;
+    if (!bridge || destroyingRef.current) return;
+    if (!viewHasTools(bridge)) {
+      setViewTools(null);
+      return;
+    }
+    try {
+      setViewTools(await listViewTools(bridge));
+    } catch (e) {
+      log.error("tools/list on view failed:", e);
+      setViewTools([]);
+    }
+  }, []);
+
+  const handleCallViewTool = useCallback((name: string, args: Record<string, unknown>) => {
+    const bridge = appBridgeRef.current;
+    if (!bridge || destroyingRef.current) {
+      return Promise.reject(new Error("App is closing"));
+    }
+    return callViewTool(bridge, name, args);
+  }, []);
 
   useEffect(() => {
     const iframe = iframeRef.current!;
@@ -445,24 +483,38 @@ function AppIFramePanel({ toolCallInfo, isDestroying, onTeardownComplete }: AppI
             onContextUpdate: setModelContext,
             onMessage: (msg) => setMessages((prev) => [...prev, msg]),
             onDisplayModeChange: setDisplayMode,
+            onViewToolsChanged: refreshViewTools,
           }, {
             // Provide container dimensions - maxHeight for flexible sizing
             containerDimensions: { maxHeight: 6000 },
             displayMode: "inline",
           });
           appBridgeRef.current = appBridge;
-          initializeApp(iframe, appBridge, toolCallInfo);
+          if (import.meta.env.DEV) {
+            const id = nextDebugBridgeId++;
+            debugBridgeIdRef.current = id;
+            (window.__basicHostBridges ??= new Map()).set(id, appBridge);
+          }
+          initializeApp(iframe, appBridge, toolCallInfo).then(() => {
+            setBridgeReady(true);
+            refreshViewTools();
+          });
         }
       });
     });
 
-  }, [toolCallInfo]);
+  }, [toolCallInfo, refreshViewTools]);
 
   // Graceful teardown: wait for guest to respond before unmounting
   // This follows the spec: "Host SHOULD wait for a response before tearing
   // down the resource (to prevent data loss)."
   useEffect(() => {
     if (!isDestroying) return;
+    destroyingRef.current = true;
+    if (debugBridgeIdRef.current !== null) {
+      window.__basicHostBridges?.delete(debugBridgeIdRef.current);
+      debugBridgeIdRef.current = null;
+    }
 
     if (!appBridgeRef.current) {
       // Bridge not ready yet (e.g., user closed before iframe loaded)
@@ -517,6 +569,13 @@ function AppIFramePanel({ toolCallInfo, isDestroying, onTeardownComplete }: AppI
   return (
     <div className={panelClassName}>
       <iframe ref={iframeRef} />
+      {bridgeReady && viewTools !== null && (
+        <ViewToolsPanel
+          tools={viewTools}
+          disabled={!!isDestroying}
+          onCall={handleCallViewTool}
+        />
+      )}
       {messages.length > 0 && (
         <CollapsiblePanel
           icon="💬"
@@ -528,6 +587,138 @@ function AppIFramePanel({ toolCallInfo, isDestroying, onTeardownComplete }: AppI
       {modelContext && (
         <CollapsiblePanel icon="📋" label="Model Context" content={fullContext} />
       )}
+    </div>
+  );
+}
+
+
+interface ViewToolCallEntry {
+  id: number;
+  toolName: string;
+  status: "pending" | "ok" | "isError" | "error";
+  content: string;
+}
+
+interface ViewToolsPanelProps {
+  tools: Tool[];
+  disabled: boolean;
+  onCall: (name: string, args: Record<string, unknown>) => Promise<CallToolResult>;
+}
+/**
+ * Lists and calls tools the view registered via `app.registerTool()`.
+ * A real host would expose these to the model; basic-host lets a human call them.
+ */
+function ViewToolsPanel({ tools, disabled, onCall }: ViewToolsPanelProps) {
+  const [expanded, setExpanded] = useState(false);
+  const [selectedTool, setSelectedTool] = useState("");
+  const [inputJson, setInputJson] = useState("{}");
+  const [inFlight, setInFlight] = useState(false);
+  const [results, setResults] = useState<ViewToolCallEntry[]>([]);
+  const nextResultIdRef = useRef(0);
+
+  const tool = tools.find((t) => t.name === selectedTool);
+
+  // Keep selection valid as the view's tool list changes
+  useEffect(() => {
+    if (tools.some((t) => t.name === selectedTool)) return;
+    const first = tools[0];
+    setSelectedTool(first?.name ?? "");
+    setInputJson(getToolDefaults(first));
+  }, [tools, selectedTool]);
+
+  const isValidJson = useMemo(() => {
+    try {
+      JSON.parse(inputJson);
+      return true;
+    } catch {
+      return false;
+    }
+  }, [inputJson]);
+
+  const handleToolSelect = (name: string) => {
+    setSelectedTool(name);
+    setInputJson(getToolDefaults(tools.find((t) => t.name === name)));
+  };
+
+  const handleSubmit = async () => {
+    const id = nextResultIdRef.current++;
+    const toolName = selectedTool;
+    const update = (entry: Partial<ViewToolCallEntry>) =>
+      setResults((prev) => prev.map((r) => (r.id === id ? { ...r, ...entry } : r)));
+
+    setResults((prev) => [{ id, toolName, status: "pending", content: "" }, ...prev]);
+    setInFlight(true);
+    try {
+      const result = await onCall(toolName, JSON.parse(inputJson));
+      update({ status: result.isError ? "isError" : "ok", content: JSON.stringify(result, null, 2) });
+    } catch (e) {
+      update({ status: "error", content: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setInFlight(false);
+    }
+  };
+
+  return (
+    <div className={styles.viewToolsPanel}>
+      <button
+        type="button"
+        className={styles.viewToolsHeader}
+        aria-expanded={expanded}
+        onClick={() => setExpanded(!expanded)}
+      >
+        <span className={styles.collapsibleLabel}>🧩 View Tools ({tools.length})</span>
+        <span className={styles.collapsibleToggle}>{expanded ? "▼" : "▶"}</span>
+      </button>
+      {expanded && (tools.length === 0 ? (
+        <p className={styles.viewToolsEmpty}>View declares tools capability but registered none.</p>
+      ) : (
+        <form onSubmit={(e) => { e.preventDefault(); handleSubmit(); }}>
+          <label>
+            View Tool
+            <select
+              className={styles.toolSelect}
+              value={selectedTool}
+              onChange={(e) => handleToolSelect(e.target.value)}
+            >
+              {tools.map((t) => (
+                <option key={t.name} value={t.name} title={t.description}>
+                  {t.title ?? t.name}{t.title ? ` (${t.name})` : ""}
+                </option>
+              ))}
+            </select>
+            {tool?.description && <span className={styles.viewToolDescription}>{tool.description}</span>}
+          </label>
+          {tool && (
+            <CollapsiblePanel
+              icon="📐"
+              label="Input Schema"
+              content={JSON.stringify(tool.inputSchema, null, 2)}
+            />
+          )}
+          <label>
+            Arguments
+            <textarea
+              className={styles.toolInput}
+              aria-invalid={!isValidJson}
+              value={inputJson}
+              onChange={(e) => setInputJson(e.target.value)}
+            />
+          </label>
+          <button type="submit" disabled={disabled || !tool || !isValidJson || inFlight}>
+            Call View Tool
+          </button>
+          {results.map((r) => (
+            <CollapsiblePanel
+              key={r.id}
+              icon="📤"
+              label={r.toolName}
+              badge={r.status}
+              content={r.content}
+              defaultExpanded
+            />
+          ))}
+        </form>
+      ))}
     </div>
   );
 }

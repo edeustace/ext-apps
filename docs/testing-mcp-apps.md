@@ -58,6 +58,7 @@ The basic-host UI includes collapsible panels to help you debug your App:
 - **Tool Result** — The result returned by your tool
 - **Messages** — Messages sent by your App to the model
 - **Model Context** — Context updates sent by your App
+- **View Tools** — Tools your App registers with `app.registerTool()`. List them and call them with JSON arguments, the way a model would in a real host
 
 For additional observability, open your browser's developer console. Basic-host logs key events with a `[HOST]` prefix, including server connections, tool calls, App initialization, and App-to-host requests.
 

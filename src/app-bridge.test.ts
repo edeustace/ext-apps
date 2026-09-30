@@ -480,6 +480,24 @@ describe("App <-> AppBridge integration", () => {
       expect(receivedSizes).toEqual([{ width: 400, height: 600 }]);
     });
 
+    it("view tool registration after connect notifies bridge of tools/list_changed", async () => {
+      let received = 0;
+      bridge.setNotificationHandler("notifications/tools/list_changed", () => {
+        received++;
+      });
+
+      app.registerTool("early", {}, async () => ({ content: [] }));
+      await app.connect(appTransport);
+      expect(bridge.getAppCapabilities()?.tools).toBeDefined();
+
+      app.registerTool("late", {}, async () => ({ content: [] }));
+      await flush();
+
+      expect(received).toBeGreaterThanOrEqual(1);
+      const { tools } = await bridge.listTools({});
+      expect(tools.map((t) => t.name)).toEqual(["early", "late"]);
+    });
+
     it("app.sendLog triggers bridge.onloggingmessage", async () => {
       const receivedLogs: unknown[] = [];
       bridge.onloggingmessage = (params) => {

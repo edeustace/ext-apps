@@ -203,6 +203,12 @@ export function loadSandboxProxy(
 }
 
 
+/**
+ * Connects the bridge, loads the view, and sends it the tool input.
+ *
+ * Resolves once the view has initialized and received its tool input, so
+ * callers can chain view-tool discovery on it.
+ */
 export async function initializeApp(
   iframe: HTMLIFrameElement,
   appBridge: AppBridge,
@@ -247,6 +253,47 @@ export async function initializeApp(
   );
 }
 
+/** True if the view declared the `tools` app capability in `ui/initialize`. */
+export function viewHasTools(appBridge: AppBridge): boolean {
+  return !!appBridge.getAppCapabilities()?.tools;
+}
+
+/**
+ * List all tools the view registered (follows pagination cursors).
+ *
+ * Only call after the view has initialized; before then its capabilities are
+ * unknown.
+ */
+export async function listViewTools(appBridge: AppBridge): Promise<Tool[]> {
+  if (!viewHasTools(appBridge)) return [];
+  const tools: Tool[] = [];
+  let cursor: string | undefined;
+  do {
+    const result = await appBridge.listTools(cursor ? { cursor } : {});
+    tools.push(...result.tools);
+    cursor = result.nextCursor;
+  } while (cursor);
+  log.info("View tools:", tools.map((t) => t.name));
+  return tools;
+}
+
+/**
+ * Call a tool registered by the view (NOT the MCP server).
+ *
+ * Protocol errors (unknown tool, invalid arguments, timeout) reject; tool-level
+ * failures resolve with `isError: true`.
+ */
+export async function callViewTool(
+  appBridge: AppBridge,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<CallToolResult> {
+  log.info("Calling view tool", name, "with input", args);
+  const result = (await appBridge.callTool({ name, arguments: args })) as CallToolResult;
+  log.info("View tool result:", result);
+  return result;
+}
+
 /**
  * Hooks into `AppBridge.oninitialized` and returns a Promise that resolves when
  * the MCP App is initialized (i.e., when the inner iframe is ready).
@@ -270,6 +317,8 @@ export interface AppBridgeCallbacks {
   onContextUpdate?: (context: ModelContext | null) => void;
   onMessage?: (message: AppMessage) => void;
   onDisplayModeChange?: (mode: "inline" | "fullscreen") => void;
+  /** Called when the view sends `notifications/tools/list_changed`. */
+  onViewToolsChanged?: () => void;
 }
 
 export interface AppBridgeOptions {
@@ -347,6 +396,14 @@ export function newAppBridge(
     window.open(params.url, "_blank", "noopener,noreferrer");
     return {};
   };
+
+  // Tools registered by the view (via `app.registerTool()`) can change after
+  // initialization. This is view → host; the server → view forwarding set up
+  // by `AppBridge.connect()` is registered on the MCP client, not the bridge.
+  appBridge.setNotificationHandler("notifications/tools/list_changed", () => {
+    log.info("View tool list changed");
+    callbacks?.onViewToolsChanged?.();
+  });
 
   appBridge.onloggingmessage = (params) => {
     log.info("Log message from MCP App:", params);

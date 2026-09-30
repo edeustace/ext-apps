@@ -171,8 +171,9 @@
     display: flex;
     flex-direction: column;
 
-    /* Hide collapsible panels in fullscreen */
-    .collapsiblePanel {
+    /* Hide collapsible panels (and the view tools panel) in fullscreen */
+    .collapsiblePanel,
+    .viewToolsPanel {
       display: none;
     }
 
@@ -182,6 +183,108 @@
       border: none;
       border-radius: 0;
     }
+  }
+}
+
+/* Tools registered by the view; nested variant of .callToolPanel's form */
+.viewToolsPanel {
+  margin: 0.5rem 0;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background-color: var(--color-bg-secondary);
+  font-size: 0.875rem;
+
+  .viewToolsHeader {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    border: none;
+    border-radius: 4px;
+    background: none;
+    font-size: inherit;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+
+    &:hover {
+      background-color: var(--color-bg);
+    }
+  }
+
+  .viewToolsEmpty {
+    margin: 0;
+    padding: 0 0.75rem 0.75rem;
+    color: var(--color-text-secondary);
+  }
+
+  form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0 0.75rem 0.75rem;
+  }
+
+  label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    font-weight: 600;
+  }
+
+  .viewToolDescription {
+    font-weight: normal;
+    color: var(--color-text-secondary);
+  }
+
+  select,
+  textarea {
+    padding: 0.375rem;
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    font-size: inherit;
+    background-color: var(--color-bg);
+    color: var(--color-text);
+  }
+
+  .toolSelect {
+    font-family: monospace;
+  }
+
+  .toolInput {
+    min-height: 4rem;
+    font-family: monospace;
+    resize: vertical;
+
+    &[aria-invalid="true"] {
+      background-color: light-dark(#fee2e2, #7f1d1d);
+    }
+  }
+
+  button[type="submit"] {
+    align-self: flex-start;
+    padding: 0.5rem 1rem;
+    border: none;
+    border-radius: 4px;
+    background-color: var(--color-primary);
+    font-size: inherit;
+    font-weight: 600;
+    color: white;
+    cursor: pointer;
+
+    &:hover:not(:disabled) {
+      background-color: var(--color-primary-hover);
+    }
+
+    &:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+  }
+
+  .collapsiblePanel {
+    margin: 0;
   }
 }
 
